@@ -555,6 +555,7 @@ extern "C" {
         GGML_OP_FILL,
 
         GGML_OP_FLASH_ATTN_EXT,
+        GGML_OP_ELSA_ATTN_EXT,
         GGML_OP_FLASH_ATTN_BACK,
         GGML_OP_SSM_CONV,
         GGML_OP_SSM_SCAN,
@@ -2413,6 +2414,29 @@ extern "C" {
             const struct ggml_tensor * a);
 
     GGML_API void ggml_flash_attn_ext_add_sinks(
+            struct ggml_tensor * a,
+            struct ggml_tensor * sinks);
+
+    // Experimental ELSA attention op. The tensor layout matches ggml_flash_attn_ext.
+    GGML_API struct ggml_tensor * ggml_elsa_attn_ext(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * q,
+            struct ggml_tensor  * k,
+            struct ggml_tensor  * v,
+            struct ggml_tensor  * mask,
+            float                 scale,
+            float                 max_bias,
+            float                 logit_softcap,
+            int                   block_size);
+
+    GGML_API void ggml_elsa_attn_ext_set_prec(
+            struct ggml_tensor * a,
+            enum ggml_prec       prec);
+
+    GGML_API enum ggml_prec ggml_elsa_attn_ext_get_prec(
+            const struct ggml_tensor * a);
+
+    GGML_API void ggml_elsa_attn_ext_add_sinks(
             struct ggml_tensor * a,
             struct ggml_tensor * sinks);
 

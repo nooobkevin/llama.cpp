@@ -152,6 +152,15 @@ llama_context::llama_context(
 
     cparams.flash_attn = params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED;
     cparams.auto_fa    = params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO;
+    cparams.elsa_attn  = []() {
+        const char * env = getenv("LLAMA_ELSA_ATTN");
+        return env && atoi(env) != 0;
+    }();
+
+    if (cparams.elsa_attn) {
+        cparams.flash_attn = false;
+        cparams.auto_fa    = false;
+    }
 
     cparams.fused_gdn_ar = true;
     cparams.fused_gdn_ch = true;
@@ -203,6 +212,7 @@ llama_context::llama_context(
     LLAMA_LOG_INFO("%s: n_ubatch      = %u\n",   __func__, cparams.n_ubatch);
     LLAMA_LOG_INFO("%s: causal_attn   = %d\n",   __func__, cparams.causal_attn);
     LLAMA_LOG_INFO("%s: flash_attn    = %s\n",   __func__, llama_flash_attn_type_name(params.flash_attn_type));
+    LLAMA_LOG_INFO("%s: elsa_attn     = %s\n",   __func__, cparams.elsa_attn ? "true" : "false");
     LLAMA_LOG_INFO("%s: kv_unified    = %s\n",   __func__, cparams.kv_unified ? "true" : "false");
     LLAMA_LOG_INFO("%s: freq_base     = %.1f\n", __func__, cparams.rope_freq_base);
     LLAMA_LOG_INFO("%s: freq_scale    = %g\n",   __func__, cparams.rope_freq_scale);

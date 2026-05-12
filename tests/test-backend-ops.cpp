@@ -6495,6 +6495,97 @@ struct test_flash_attn_ext : public test_case {
     }
 };
 
+// GGML_OP_ELSA_ATTN_EXT
+struct test_elsa_attn_ext : public test_flash_attn_ext {
+    using test_flash_attn_ext::test_flash_attn_ext;
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        const int64_t hsk_padded = GGML_PAD(hsk, ggml_blck_size(type_K));
+        const int64_t hsv_padded = GGML_PAD(hsv, ggml_blck_size(type_V));
+
+        auto const &create_permuted = [&](ggml_type type, int64_t ne0, int64_t ne1, int64_t ne2, int64_t ne3, bool is_view) -> ggml_tensor * {
+            int64_t ne[4] = {ne0, ne1, ne2, ne3};
+            int64_t ne_perm[4];
+            for (int i = 0; i < 4; ++i) {
+                ne_perm[permute[i]] = ne[i];
+            }
+            ggml_tensor * t;
+            if (is_view) {
+                ggml_tensor * t0 = ggml_new_tensor_4d(ctx, type, ne_perm[0], 2*ne_perm[1], ne_perm[2], ne_perm[3]);
+                t = ggml_view_4d(ctx, t0, ne_perm[0], ne_perm[1], ne_perm[2], ne_perm[3], t0->nb[1], t0->nb[2], t0->nb[3], 0);
+            } else {
+                t = ggml_new_tensor_4d(ctx, type, ne_perm[0], ne_perm[1], ne_perm[2], ne_perm[3]);
+            }
+            if (permute != std::array<int32_t, 4>{0, 1, 2, 3}) {
+                t = ggml_permute(ctx, t, permute[0], permute[1], permute[2], permute[3]);
+            }
+            return t;
+        };
+
+        ggml_tensor * q = create_permuted(GGML_TYPE_F32, hsk_padded, nb, nh*nr23[0], nr23[1], false);
+        ggml_set_name(q, "q");
+
+        ggml_tensor * k = create_permuted(type_K, hsk_padded, kv, nh, nr23[1], true);
+        ggml_set_name(k, "k");
+
+        ggml_tensor * v = create_permuted(type_V, hsv_padded, kv, nh, nr23[1], true);
+        ggml_set_name(v, "v");
+
+        ggml_tensor * m = nullptr;
+        if (mask) {
+            m = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, kv, nb, 1, nr23[1]);
+            ggml_set_name(m, "m");
+        }
+
+        ggml_tensor * s = nullptr;
+        if (sinks) {
+            s = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, q->ne[2]);
+            ggml_set_name(s, "s");
+        }
+
+        ggml_tensor * out = ggml_elsa_attn_ext(ctx, q, k, v, m, 1.0f/sqrtf(hsk), max_bias, logit_softcap, 128);
+        ggml_elsa_attn_ext_add_sinks(out, s);
+        ggml_elsa_attn_ext_set_prec(out, prec);
+        ggml_set_name(out, "out");
+
+        return out;
+    }
+};
+
+struct test_elsa_attn_ext_causal : public test_elsa_attn_ext {
+    using test_elsa_attn_ext::test_elsa_attn_ext;
+
+    std::string vars() override {
+        return test_elsa_attn_ext::vars() + ",causal=1";
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
+            if (strcmp(t->name, "m") == 0) {
+                GGML_ASSERT(t->type == GGML_TYPE_F16);
+                std::vector<ggml_fp16_t> data(ggml_nelements(t), ggml_fp32_to_fp16(0.0f));
+
+                for (int64_t i3 = 0; i3 < t->ne[3]; ++i3) {
+                    for (int64_t i2 = 0; i2 < t->ne[2]; ++i2) {
+                        for (int64_t iq = 0; iq < t->ne[1]; ++iq) {
+                            for (int64_t ik = iq + 1; ik < t->ne[0]; ++ik) {
+                                const int64_t idx = i3*t->ne[2]*t->ne[1]*t->ne[0] + i2*t->ne[1]*t->ne[0] + iq*t->ne[0] + ik;
+                                data[idx] = ggml_fp32_to_fp16(-INFINITY);
+                            }
+                        }
+                    }
+                }
+
+                ggml_backend_tensor_set(t, data.data(), 0, data.size()*sizeof(ggml_fp16_t));
+            } else if (strcmp(t->name, "s") == 0) {
+                init_tensor_uniform(t, -10.0f, 10.0f);
+            } else {
+                init_tensor_uniform(t);
+            }
+        }
+    }
+};
+
 // GGML_OP_CROSS_ENTROPY_LOSS
 struct test_cross_entropy_loss : public test_case {
     const ggml_type type;
@@ -7013,6 +7104,7 @@ struct test_generic_op : public test_case {
         case GGML_OP_RWKV_WKV7:
             return 5e-3;
         case GGML_OP_FLASH_ATTN_EXT:
+        case GGML_OP_ELSA_ATTN_EXT:
         {
             // Scale error with kv length to account for accumulating floating point error
             const int64_t kv = sources[1].ne[1];
@@ -7035,8 +7127,8 @@ struct test_generic_op : public test_case {
                 break;
             }
 
-            // FLASH_ATTN_EXT: src[3] is the KQ mask
-            if (op == GGML_OP_FLASH_ATTN_EXT && i == 3) {
+            // Attention ops: src[3] is the KQ mask
+            if ((op == GGML_OP_FLASH_ATTN_EXT || op == GGML_OP_ELSA_ATTN_EXT) && i == 3) {
                 init_tensor_kq_mask(t);
                 continue;
             }
@@ -8906,6 +8998,27 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_flash_attn_ext(64, 128, 4, {1, 1}, 128, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q4_0, GGML_TYPE_Q1_0));
     test_cases.emplace_back(new test_flash_attn_ext(128, 64, 4, {1, 1}, 64, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q1_0, GGML_TYPE_F16));
 
+    for (int hsk : { 64, 128 }) {
+        for (int kv : { 113, 512 }) {
+            for (int nb : { 1, 8 }) {
+                for (bool mask : { true, false }) {
+                    for (ggml_type type_KV : { GGML_TYPE_F32, GGML_TYPE_F16 }) {
+                        test_cases.emplace_back(new test_elsa_attn_ext(
+                                    hsk, hsk, 4, {1, 1}, kv, nb, mask, false, 0.0f, 0.0f, GGML_PREC_F32, type_KV, type_KV));
+                    }
+                }
+            }
+        }
+    }
+
+    for (int nb : { 1, 16 }) {
+        test_cases.emplace_back(new test_elsa_attn_ext(
+                    8, 8, 4, {2, 1}, 256, nb, true, false, 0.0f, 0.0f, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
+    }
+
+    test_cases.emplace_back(new test_elsa_attn_ext_causal(
+                8, 8, 4, {2, 1}, 256, 16, true, false, 0.0f, 0.0f, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
+
     test_cases.emplace_back(new test_cross_entropy_loss     (GGML_TYPE_F32, {   10, 5, 4, 3}));
     test_cases.emplace_back(new test_cross_entropy_loss     (GGML_TYPE_F32, {30000, 1, 1, 1}));
     test_cases.emplace_back(new test_cross_entropy_loss_back(GGML_TYPE_F32, {   10, 5, 4, 3}));
@@ -9185,6 +9298,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
         for (int hs : { 64, 128, }) {
             for (int nr : { 1, 4, }) {
                 test_cases.emplace_back(new test_flash_attn_ext(hs, hs, 8, {nr, 1}, kv, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
+                test_cases.emplace_back(new test_elsa_attn_ext (hs, hs, 8, {nr, 1}, kv, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
             }
         }
     }

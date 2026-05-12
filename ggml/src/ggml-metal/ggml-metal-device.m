@@ -1184,6 +1184,20 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                     return false;
             }
             return has_simdgroup_mm; // TODO: over-restricted for vec-kernels
+        case GGML_OP_ELSA_ATTN_EXT:
+            if (op->src[0]->type != GGML_TYPE_F32) {
+                return false;
+            }
+            if (op->src[1]->type != GGML_TYPE_F32 && op->src[1]->type != GGML_TYPE_F16) {
+                return false;
+            }
+            if (op->src[2]->type != GGML_TYPE_F32 && op->src[2]->type != GGML_TYPE_F16) {
+                return false;
+            }
+            if (op->src[3] && op->src[3]->type != GGML_TYPE_F16) {
+                return false;
+            }
+            return has_simdgroup_reduction;
         case GGML_OP_SSM_CONV:
         case GGML_OP_SSM_SCAN:
             return has_simdgroup_reduction;

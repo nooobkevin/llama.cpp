@@ -582,6 +582,62 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_rwkv(ggml_metal_
     return res;
 }
 
+ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_elsa_attn_ext(
+        ggml_metal_library_t lib, const ggml_tensor * op,
+        bool has_mask, bool has_sinks, bool has_bias, bool has_scap) {
+    char base[256];
+    char name[256];
+
+    const char * type_k = op->src[1]->type == GGML_TYPE_F32 ? "F32" : "F16";
+    const char * type_v = op->src[2]->type == GGML_TYPE_F32 ? "F32" : "F16";
+
+    snprintf(base, 256, "kernel_elsa_attn_ext_%s_%s", type_k, type_v);
+    snprintf(name, 256, "%s_mask=%d_sinks=%d_bias=%d_scap=%d", base, has_mask, has_sinks, has_bias, has_scap);
+
+    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+    if (!res.pipeline) {
+        ggml_metal_cv_t cv = ggml_metal_cv_init();
+
+        ggml_metal_cv_set_bool(cv, has_mask,  FC_ELSA_ATTN_EXT + 0);
+        ggml_metal_cv_set_bool(cv, has_sinks, FC_ELSA_ATTN_EXT + 1);
+        ggml_metal_cv_set_bool(cv, has_bias,  FC_ELSA_ATTN_EXT + 2);
+        ggml_metal_cv_set_bool(cv, has_scap,  FC_ELSA_ATTN_EXT + 3);
+
+        res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
+
+        ggml_metal_cv_free(cv);
+    }
+
+    int32_t block_size = ggml_get_op_params_i32(op, 4);
+    if (block_size <= 0) {
+        block_size = 128;
+    }
+    if (const char * env = getenv("GGML_METAL_ELSA_BLOCK_SIZE")) {
+        const int env_block_size = atoi(env);
+        if (env_block_size > 0) {
+            block_size = env_block_size;
+        }
+    }
+    block_size = std::max<int32_t>(32, std::min<int32_t>(1024, block_size));
+    block_size = 32*((block_size + 31)/32);
+
+    res.smem = block_size * sizeof(float);
+
+    return res;
+}
+
+ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_elsa_attn_ext_reduce(ggml_metal_library_t lib) {
+    const char * base = "kernel_elsa_attn_ext_reduce";
+    const char * name = "kernel_elsa_attn_ext_reduce";
+
+    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+    if (!res.pipeline) {
+        res = ggml_metal_library_compile_pipeline(lib, base, name, nullptr);
+    }
+
+    return res;
+}
+
 ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_gated_delta_net(ggml_metal_library_t lib, const ggml_tensor * op) {
     char base[256];
     char name[256];
@@ -1248,7 +1304,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_p
         const struct ggml_tensor * op,
         bool    has_mask,
         int32_t ncpsg) {
-    assert(op->op == GGML_OP_FLASH_ATTN_EXT);
+    assert(op->op == GGML_OP_FLASH_ATTN_EXT || op->op == GGML_OP_ELSA_ATTN_EXT);
     GGML_UNUSED(op);
 
     char base[256];
@@ -1291,7 +1347,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_b
         const struct ggml_tensor * op,
         int32_t nqptg,
         int32_t ncpsg) {
-    assert(op->op == GGML_OP_FLASH_ATTN_EXT);
+    assert(op->op == GGML_OP_FLASH_ATTN_EXT || op->op == GGML_OP_ELSA_ATTN_EXT);
     GGML_UNUSED(op);
 
     char base[256];
@@ -1338,7 +1394,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext(
         bool    has_scap,
         bool    has_kvpad,
         int32_t nsg) {
-    assert(op->op == GGML_OP_FLASH_ATTN_EXT);
+    assert(op->op == GGML_OP_FLASH_ATTN_EXT || op->op == GGML_OP_ELSA_ATTN_EXT);
 
     char base[256];
     char name[256];
@@ -1404,7 +1460,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_v
         bool    has_kvpad,
         int32_t nsg,
         int32_t nwg) {
-    assert(op->op == GGML_OP_FLASH_ATTN_EXT);
+    assert(op->op == GGML_OP_FLASH_ATTN_EXT || op->op == GGML_OP_ELSA_ATTN_EXT);
 
     char base[256];
     char name[256];
@@ -1460,7 +1516,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_flash_attn_ext_v
         const ggml_tensor * op,
         int32_t dv,
         int32_t nwg) {
-    assert(op->op == GGML_OP_FLASH_ATTN_EXT);
+    assert(op->op == GGML_OP_FLASH_ATTN_EXT || op->op == GGML_OP_ELSA_ATTN_EXT);
 
     char base[256];
     char name[256];
