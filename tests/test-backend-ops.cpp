@@ -6543,7 +6543,7 @@ struct test_elsa_attn_ext : public test_flash_attn_ext {
             ggml_set_name(s, "s");
         }
 
-        ggml_tensor * out = ggml_elsa_attn_ext(ctx, q, k, v, m, 1.0f/sqrtf(hsk), max_bias, logit_softcap, 128);
+        ggml_tensor * out = ggml_elsa_attn_ext(ctx, q, k, v, m, 1.0f/sqrtf(hsk), max_bias, logit_softcap, 32);
         ggml_elsa_attn_ext_add_sinks(out, s);
         ggml_elsa_attn_ext_set_prec(out, prec);
         ggml_set_name(out, "out");
@@ -9011,6 +9011,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
     }
 
+    test_cases.emplace_back(new test_elsa_attn_ext(
+                128, 128, 4, {1, 1}, 512, 32, true, false, 0.0f, 0.0f, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
+
     for (int nb : { 1, 16 }) {
         test_cases.emplace_back(new test_elsa_attn_ext(
                     8, 8, 4, {2, 1}, 256, nb, true, false, 0.0f, 0.0f, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
@@ -9018,6 +9021,23 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
 
     test_cases.emplace_back(new test_elsa_attn_ext_causal(
                 8, 8, 4, {2, 1}, 256, 16, true, false, 0.0f, 0.0f, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
+
+    if (getenv("GGML_TEST_ELSA_PROFILE_ONLY")) {
+        test_cases.clear();
+        const int hsk = getenv("GGML_TEST_ELSA_PROFILE_HS") ? atoi(getenv("GGML_TEST_ELSA_PROFILE_HS")) : 128;
+        const int hsv = getenv("GGML_TEST_ELSA_PROFILE_HV") ? atoi(getenv("GGML_TEST_ELSA_PROFILE_HV")) : hsk;
+        const int nh  = getenv("GGML_TEST_ELSA_PROFILE_NH") ? atoi(getenv("GGML_TEST_ELSA_PROFILE_NH")) : 8;
+        const int nr  = getenv("GGML_TEST_ELSA_PROFILE_NR") ? atoi(getenv("GGML_TEST_ELSA_PROFILE_NR")) : 1;
+        const int kv  = getenv("GGML_TEST_ELSA_PROFILE_KV") ? atoi(getenv("GGML_TEST_ELSA_PROFILE_KV")) : 65536;
+        const int nb  = getenv("GGML_TEST_ELSA_PROFILE_NB") ? atoi(getenv("GGML_TEST_ELSA_PROFILE_NB")) : 1;
+        const bool flash = getenv("GGML_TEST_ELSA_PROFILE_FLASH") && atoi(getenv("GGML_TEST_ELSA_PROFILE_FLASH")) > 0;
+        if (flash) {
+            test_cases.emplace_back(new test_flash_attn_ext(hsk, hsv, nh, {nr, 1}, kv, nb, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
+        } else {
+            test_cases.emplace_back(new test_elsa_attn_ext(hsk, hsv, nh, {nr, 1}, kv, nb, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
+        }
+        return test_cases;
+    }
 
     test_cases.emplace_back(new test_cross_entropy_loss     (GGML_TYPE_F32, {   10, 5, 4, 3}));
     test_cases.emplace_back(new test_cross_entropy_loss     (GGML_TYPE_F32, {30000, 1, 1, 1}));
@@ -9302,6 +9322,34 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
             }
         }
     }
+
+    for (int kv : { 32768, 65536, 131072, }) {
+        for (int nb : { 1, 4, }) {
+            test_cases.emplace_back(new test_flash_attn_ext(128, 128, 8, {1, 1}, kv, nb, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
+            test_cases.emplace_back(new test_elsa_attn_ext (128, 128, 8, {1, 1}, kv, nb, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
+        }
+        test_cases.emplace_back(new test_flash_attn_ext(128, 128, 8, {1, 1}, kv, 32, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
+        test_cases.emplace_back(new test_elsa_attn_ext (128, 128, 8, {1, 1}, kv, 32, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
+    }
+
+    if (getenv("GGML_TEST_ELSA_PROFILE_ONLY")) {
+        test_cases.clear();
+        const int hsk = getenv("GGML_TEST_ELSA_PROFILE_HS") ? atoi(getenv("GGML_TEST_ELSA_PROFILE_HS")) : 128;
+        const int hsv = getenv("GGML_TEST_ELSA_PROFILE_HV") ? atoi(getenv("GGML_TEST_ELSA_PROFILE_HV")) : hsk;
+        const int nh  = getenv("GGML_TEST_ELSA_PROFILE_NH") ? atoi(getenv("GGML_TEST_ELSA_PROFILE_NH")) : 8;
+        const int nr  = getenv("GGML_TEST_ELSA_PROFILE_NR") ? atoi(getenv("GGML_TEST_ELSA_PROFILE_NR")) : 1;
+        const int kv  = getenv("GGML_TEST_ELSA_PROFILE_KV") ? atoi(getenv("GGML_TEST_ELSA_PROFILE_KV")) : 65536;
+        const int nb  = getenv("GGML_TEST_ELSA_PROFILE_NB") ? atoi(getenv("GGML_TEST_ELSA_PROFILE_NB")) : 1;
+        const bool flash = getenv("GGML_TEST_ELSA_PROFILE_FLASH") && atoi(getenv("GGML_TEST_ELSA_PROFILE_FLASH")) > 0;
+        if (flash) {
+            test_cases.emplace_back(new test_flash_attn_ext(hsk, hsv, nh, {nr, 1}, kv, nb, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
+        } else {
+            test_cases.emplace_back(new test_elsa_attn_ext(hsk, hsv, nh, {nr, 1}, kv, nb, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
+        }
+        return test_cases;
+    }
+
+    test_cases.emplace_back(new test_elsa_attn_ext(128, 128, 8, {1, 1}, 512, 32, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
 
     for (int col : {8192, 16384, 32768, 65536, 131072, 262144, 524288}) {
         for (int rows : {1, 4, 16}){

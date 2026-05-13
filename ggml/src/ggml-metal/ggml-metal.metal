@@ -7301,6 +7301,20 @@ static inline float elsa_qk_dot(device const float * q, device const k_t * k, in
 }
 
 template<int N, typename k_t>
+static inline float elsa_qk_dot_dk(device const float * q, device const k_t * k) {
+    float sum = 0.0f;
+    for (int d = 0; d < N; d += 4) {
+        sum += dot(elsa_load4(q + d), elsa_load4(k + d));
+    }
+    return sum;
+}
+
+template<int N, typename k_t>
+static inline float elsa_qk_dot_maybe_dk(device const float * q, device const k_t * k, int n) {
+    return N > 0 ? elsa_qk_dot_dk<N>(q, k) : elsa_qk_dot(q, k, n);
+}
+
+template<int N, typename k_t>
 static inline float elsa_qk_dot_lane(device const float * q, device const k_t * k, uint tiisg) {
     float4 sum4 = 0.0f;
     for (int d = (int) tiisg*4; d < N; d += N_SIMDWIDTH*4) {
@@ -7309,7 +7323,7 @@ static inline float elsa_qk_dot_lane(device const float * q, device const k_t * 
     return simd_sum(sum4[0] + sum4[1] + sum4[2] + sum4[3]);
 }
 
-template<typename k_t, typename v_t>
+template<typename k_t, typename v_t, int DK = 0>
 kernel void kernel_elsa_attn_ext(
         constant ggml_metal_kargs_elsa_attn_ext & args,
         device  const char  * q,
@@ -7324,18 +7338,19 @@ kernel void kernel_elsa_attn_ext(
         uint  sgitg [[simdgroup_index_in_threadgroup]],
         uint  tiisg [[thread_index_in_simdgroup]]) {
     const bool multi_row_tg = args.rows_per_tg > 1;
-    const bool row_leader = multi_row_tg ? tiisg == 0 : tiitg == 0;
     const int row = multi_row_tg ? (int) tgpig.x*args.rows_per_tg + (int) sgitg : (int) tgpig.x;
     if (multi_row_tg && (int) sgitg >= args.rows_per_tg) {
         return;
     }
-    const int iq3 = row / (args.ne02*args.ne01);
-    const int iq2 = (row - iq3*args.ne02*args.ne01) / args.ne01;
-    const int iq1 = row - iq3*args.ne02*args.ne01 - iq2*args.ne01;
 
     if (row >= args.ne03*args.ne02*args.ne01) {
         return;
     }
+
+    const bool row_leader = multi_row_tg ? tiisg == 0 : tiitg == 0;
+    const int iq3 = row / (args.ne02*args.ne01);
+    const int iq2 = (row - iq3*args.ne02*args.ne01) / args.ne01;
+    const int iq1 = row - iq3*args.ne02*args.ne01 - iq2*args.ne01;
 
     const int ik2 = iq2 / (args.ne02 / args.ne12);
     const int ik3 = iq3;
@@ -7424,7 +7439,7 @@ kernel void kernel_elsa_attn_ext(
                     score = -INFINITY;
                 } else {
                     device const k_t * pk = (device const k_t *) (k + ic*args.nb11 + ik2*args.nb12 + ik3*args.nb13);
-                    score = elsa_qk_dot(pq, pk, args.ne00);
+                    score = elsa_qk_dot_maybe_dk<DK>(pq, pk, args.ne00);
 
                     score *= args.scale;
                     if (FC_elsa_attn_ext_has_scap) {
@@ -7434,7 +7449,7 @@ kernel void kernel_elsa_attn_ext(
                 }
             } else {
                 device const k_t * pk = (device const k_t *) (k + ic*args.nb11 + ik2*args.nb12 + ik3*args.nb13);
-                score = elsa_qk_dot(pq, pk, args.ne00);
+                score = elsa_qk_dot_maybe_dk<DK>(pq, pk, args.ne00);
 
                 score *= args.scale;
                 if (FC_elsa_attn_ext_has_scap) {
@@ -7496,10 +7511,11 @@ kernel void kernel_elsa_attn_ext(
                     const int jc = ib + lane;
                     if (dv < args.ne20 && jc < ib_end) {
                         if (wj != 0.0f) {
-                            device const v_t * pv = (device const v_t *) (v + jc*args.nb21 + iv2*args.nb22 + iv3*args.nb23);
                             if (dv + 3 < args.ne20) {
+                                device const v_t * pv = (device const v_t *) (v + jc*args.nb21 + iv2*args.nb22 + iv3*args.nb23);
                                 Wb += elsa_load4(pv + dv)*wj;
                             } else {
+                                device const v_t * pv = (device const v_t *) (v + jc*args.nb21 + iv2*args.nb22 + iv3*args.nb23);
                                 Wb[0] += (dv + 0 < args.ne20) ? (float) pv[dv + 0]*wj : 0.0f;
                                 Wb[1] += (dv + 1 < args.ne20) ? (float) pv[dv + 1]*wj : 0.0f;
                                 Wb[2] += (dv + 2 < args.ne20) ? (float) pv[dv + 2]*wj : 0.0f;
@@ -7610,6 +7626,513 @@ kernel void kernel_elsa_attn_ext(
         pdst[args.ne20 + 0] = S;
         pdst[args.ne20 + 1] = M;
     }
+}
+
+template<typename k_t, typename v_t>
+kernel void kernel_elsa_attn_ext_block(
+        constant ggml_metal_kargs_elsa_attn_ext & args,
+        device  const char  * q,
+        device  const char  * k,
+        device  const char  * v,
+        device  const half  * mask,
+        device  const float * sinks,
+        device        float * dst,
+        threadgroup   float * scratch [[threadgroup(0)]],
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        uint  sgitg [[simdgroup_index_in_threadgroup]],
+        uint  tiisg [[thread_index_in_simdgroup]]) {
+    const int row = (int) tgpig.x*args.rows_per_tg + (int) sgitg;
+    if ((int) sgitg >= args.rows_per_tg || row >= args.ne03*args.ne02*args.ne01) {
+        return;
+    }
+
+    const int iq3 = row / (args.ne02*args.ne01);
+    const int iq2 = (row - iq3*args.ne02*args.ne01) / args.ne01;
+    const int iq1 = row - iq3*args.ne02*args.ne01 - iq2*args.ne01;
+
+    const int ik2 = iq2 / (args.ne02 / args.ne12);
+    const int ik3 = iq3;
+    const int iv2 = iq2 / (args.ne02 / args.ne12);
+    const int iv3 = iq3;
+
+    const int h = iq2;
+    const float slope = FC_elsa_attn_ext_has_bias
+        ? (h < args.n_head_log2 ? pow(args.m0, (float) h + 1.0f) : pow(args.m1, (float) (2*(h - args.n_head_log2) + 1)))
+        : 1.0f;
+
+    device const float * pq = (device const float *) (q + iq1*args.nb01 + iq2*args.nb02 + iq3*args.nb03);
+    device const half  * pm = FC_elsa_attn_ext_has_mask
+        ? (device const half *) ((device const char *) mask + iq1*args.nb31 + (iq2%args.ne32)*args.nb32 + (iq3%args.ne33)*args.nb33)
+        : nullptr;
+
+    const int ib = (int) tgpig.z*args.block_size;
+    const int ib_end = min(ib + args.block_size, args.ne11);
+    const int ic = ib + (int) tiisg;
+
+    float score = -INFINITY;
+    if (ic < ib_end) {
+        float mv = 0.0f;
+        if (FC_elsa_attn_ext_has_mask) {
+            mv = slope*(float) pm[ic];
+        }
+        if (mv != -INFINITY) {
+            device const k_t * pk = (device const k_t *) (k + ic*args.nb11 + ik2*args.nb12 + ik3*args.nb13);
+            score = elsa_qk_dot(pq, pk, args.ne00);
+            score *= args.scale;
+            if (FC_elsa_attn_ext_has_scap) {
+                score = args.logit_softcap*precise::tanh(score);
+            }
+            score += mv;
+        }
+    }
+
+    const float M = simd_max(score);
+    const float ws = isinf(M) ? 0.0f : exp(score - M);
+    const float S = simd_sum(ws);
+
+    const int64_t rid = iq3*args.ne2*args.ne1 + iq2 + iq1*args.ne1;
+    const int64_t stride = args.ne20 + 2;
+    device float * pdst = dst + (rid*args.nwg + (int) tgpig.z)*stride;
+
+    const int nvg = (args.ne20 + 4*N_SIMDWIDTH - 1)/(4*N_SIMDWIDTH);
+    for (int vg = 0; vg < nvg; ++vg) {
+        const int dv = vg*N_SIMDWIDTH*4 + tiisg*4;
+        float4 Wb = 0.0f;
+        for (ushort lane = 0; lane < N_SIMDWIDTH; ++lane) {
+            const float wj = simd_shuffle(ws, lane);
+            const int jc = ib + lane;
+            if (dv < args.ne20 && jc < ib_end && wj != 0.0f) {
+                device const v_t * pv = (device const v_t *) (v + jc*args.nb21 + iv2*args.nb22 + iv3*args.nb23);
+                if (dv + 3 < args.ne20) {
+                    Wb += elsa_load4(pv + dv)*wj;
+                } else {
+                    Wb[0] += (dv + 0 < args.ne20) ? (float) pv[dv + 0]*wj : 0.0f;
+                    Wb[1] += (dv + 1 < args.ne20) ? (float) pv[dv + 1]*wj : 0.0f;
+                    Wb[2] += (dv + 2 < args.ne20) ? (float) pv[dv + 2]*wj : 0.0f;
+                    Wb[3] += 0.0f;
+                }
+            }
+        }
+
+        if (dv + 0 < args.ne20) {
+            pdst[dv + 0] = Wb[0];
+        }
+        if (dv + 1 < args.ne20) {
+            pdst[dv + 1] = Wb[1];
+        }
+        if (dv + 2 < args.ne20) {
+            pdst[dv + 2] = Wb[2];
+        }
+        if (dv + 3 < args.ne20) {
+            pdst[dv + 3] = Wb[3];
+        }
+    }
+
+    if (tiisg == 0) {
+        pdst[args.ne20 + 0] = S;
+        pdst[args.ne20 + 1] = M;
+    }
+
+    (void) scratch;
+    (void) sinks;
+}
+
+kernel void kernel_elsa_attn_ext_vec128_F16_F16(
+        constant ggml_metal_kargs_elsa_attn_ext & args,
+        device  const char  * q,
+        device  const char  * k,
+        device  const char  * v,
+        device  const half  * mask,
+        device  const float * sinks,
+        device        float * dst,
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        uint  tiisg [[thread_index_in_simdgroup]]) {
+    const int row = (int) tgpig.x;
+    if (row >= args.ne03*args.ne02*args.ne01) {
+        return;
+    }
+
+    const int iq3 = row / (args.ne02*args.ne01);
+    const int iq2 = (row - iq3*args.ne02*args.ne01) / args.ne01;
+    const int iq1 = row - iq3*args.ne02*args.ne01 - iq2*args.ne01;
+
+    const int ik2 = iq2 / (args.ne02 / args.ne12);
+    const int ik3 = iq3;
+    const int iv2 = iq2 / (args.ne02 / args.ne12);
+    const int iv3 = iq3;
+
+    const int h = iq2;
+    const float slope = FC_elsa_attn_ext_has_bias
+        ? (h < args.n_head_log2 ? pow(args.m0, (float) h + 1.0f) : pow(args.m1, (float) (2*(h - args.n_head_log2) + 1)))
+        : 1.0f;
+
+    device const float * pq = (device const float *) (q + iq1*args.nb01 + iq2*args.nb02 + iq3*args.nb03);
+    device const half  * pm = FC_elsa_attn_ext_has_mask
+        ? (device const half *) ((device const char *) mask + iq1*args.nb31 + (iq2%args.ne32)*args.nb32 + (iq3%args.ne33)*args.nb33)
+        : nullptr;
+
+    float M = -INFINITY;
+    float S = 0.0f;
+    float4 W = 0.0f;
+
+    const int64_t rid = iq3*args.ne2*args.ne1 + iq2 + iq1*args.ne1;
+    const int iwg = (int) tgpig.z;
+    const int64_t dst_stride = args.ne20 + 2;
+    device float * pdst = dst + (rid*args.nwg + iwg)*dst_stride;
+
+    const int dv = (int) tiisg*4;
+
+    for (int ib = iwg*args.block_size; ib < args.ne11; ib += args.block_size*args.nwg) {
+        const int ib_end = min(ib + args.block_size, args.ne11);
+        const int ic = ib + (int) tiisg;
+
+        float score = -INFINITY;
+        if (ic < ib_end) {
+            float mv = 0.0f;
+            if (FC_elsa_attn_ext_has_mask) {
+                mv = slope*(float) pm[ic];
+            }
+            if (mv != -INFINITY) {
+                device const half * pk = (device const half *) (k + ic*args.nb11 + ik2*args.nb12 + ik3*args.nb13);
+                score = elsa_qk_dot(pq, pk, 128);
+                score *= args.scale;
+                if (FC_elsa_attn_ext_has_scap) {
+                    score = args.logit_softcap*precise::tanh(score);
+                }
+                score += mv;
+            }
+        }
+
+        const float Mb = simd_max(score);
+        const float ws = isinf(Mb) ? 0.0f : exp(score - Mb);
+        const float Sb = simd_sum(ws);
+        if (Sb == 0.0f) {
+            continue;
+        }
+
+        const float M_new = max(M, Mb);
+        const float w_old = exp(M - M_new);
+        const float w_blk = exp(Mb - M_new);
+
+        float4 Wb = 0.0f;
+        for (ushort lane = 0; lane < N_SIMDWIDTH; ++lane) {
+            const float wj = simd_shuffle(ws, lane);
+            const int jc = ib + lane;
+            if (jc < ib_end && wj != 0.0f) {
+                device const half * pv = (device const half *) (v + jc*args.nb21 + iv2*args.nb22 + iv3*args.nb23);
+                Wb += elsa_load4(pv + dv)*wj;
+            }
+        }
+
+        W = W*w_old + Wb*w_blk;
+        S = S*w_old + Sb*w_blk;
+        M = M_new;
+    }
+
+    pdst[dv + 0] = W[0];
+    pdst[dv + 1] = W[1];
+    pdst[dv + 2] = W[2];
+    pdst[dv + 3] = W[3];
+
+    if (tiisg == 0) {
+        pdst[args.ne20 + 0] = S;
+        pdst[args.ne20 + 1] = M;
+    }
+
+    (void) sinks;
+}
+
+kernel void kernel_elsa_attn_ext_vec128_nsg4_F16_F16(
+        constant ggml_metal_kargs_elsa_attn_ext & args,
+        device  const char  * q,
+        device  const char  * k,
+        device  const char  * v,
+        device  const half  * mask,
+        device  const float * sinks,
+        device        float * dst,
+        threadgroup   float * scratch [[threadgroup(0)]],
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        uint  sgitg [[simdgroup_index_in_threadgroup]],
+        uint  tiisg [[thread_index_in_simdgroup]]) {
+    const int row = (int) tgpig.x;
+    if (row >= args.ne03*args.ne02*args.ne01) {
+        return;
+    }
+
+    const int iq3 = row / (args.ne02*args.ne01);
+    const int iq2 = (row - iq3*args.ne02*args.ne01) / args.ne01;
+    const int iq1 = row - iq3*args.ne02*args.ne01 - iq2*args.ne01;
+
+    const int ik2 = iq2 / (args.ne02 / args.ne12);
+    const int ik3 = iq3;
+    const int iv2 = iq2 / (args.ne02 / args.ne12);
+    const int iv3 = iq3;
+
+    const int h = iq2;
+    const float slope = FC_elsa_attn_ext_has_bias
+        ? (h < args.n_head_log2 ? pow(args.m0, (float) h + 1.0f) : pow(args.m1, (float) (2*(h - args.n_head_log2) + 1)))
+        : 1.0f;
+
+    device const float * pq = (device const float *) (q + iq1*args.nb01 + iq2*args.nb02 + iq3*args.nb03);
+    device const half  * pm = FC_elsa_attn_ext_has_mask
+        ? (device const half *) ((device const char *) mask + iq1*args.nb31 + (iq2%args.ne32)*args.nb32 + (iq3%args.ne33)*args.nb33)
+        : nullptr;
+
+    float M = -INFINITY;
+    float S = 0.0f;
+    float4 W = 0.0f;
+
+    const int iwg = (int) tgpig.z;
+    const int dv = (int) tiisg*4;
+
+    for (int ib = (iwg*4 + (int) sgitg)*args.block_size; ib < args.ne11; ib += args.block_size*args.nwg*4) {
+        const int ib_end = min(ib + args.block_size, args.ne11);
+        const int ic = ib + (int) tiisg;
+
+        float score = -INFINITY;
+        if (ic < ib_end) {
+            float mv = 0.0f;
+            if (FC_elsa_attn_ext_has_mask) {
+                mv = slope*(float) pm[ic];
+            }
+            if (mv != -INFINITY) {
+                device const half * pk = (device const half *) (k + ic*args.nb11 + ik2*args.nb12 + ik3*args.nb13);
+                score = elsa_qk_dot(pq, pk, 128);
+                score *= args.scale;
+                if (FC_elsa_attn_ext_has_scap) {
+                    score = args.logit_softcap*precise::tanh(score);
+                }
+                score += mv;
+            }
+        }
+
+        const float Mb = simd_max(score);
+        const float ws = isinf(Mb) ? 0.0f : exp(score - Mb);
+        const float Sb = simd_sum(ws);
+        if (Sb == 0.0f) {
+            continue;
+        }
+
+        const float M_new = max(M, Mb);
+        const float w_old = exp(M - M_new);
+        const float w_blk = exp(Mb - M_new);
+
+        float4 Wb = 0.0f;
+        for (ushort lane = 0; lane < N_SIMDWIDTH; ++lane) {
+            const float wj = simd_shuffle(ws, lane);
+            const int jc = ib + lane;
+            if (jc < ib_end && wj != 0.0f) {
+                device const half * pv = (device const half *) (v + jc*args.nb21 + iv2*args.nb22 + iv3*args.nb23);
+                Wb += elsa_load4(pv + dv)*wj;
+            }
+        }
+
+        W = W*w_old + Wb*w_blk;
+        S = S*w_old + Sb*w_blk;
+        M = M_new;
+    }
+
+    threadgroup float * srow = scratch + (int) sgitg*(args.ne20 + 2);
+    srow[dv + 0] = W[0];
+    srow[dv + 1] = W[1];
+    srow[dv + 2] = W[2];
+    srow[dv + 3] = W[3];
+    if (tiisg == 0) {
+        srow[args.ne20 + 0] = S;
+        srow[args.ne20 + 1] = M;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sgitg != 0) {
+        return;
+    }
+
+    float M_all = -INFINITY;
+    for (int sg = 0; sg < 4; ++sg) {
+        M_all = max(M_all, scratch[sg*(args.ne20 + 2) + args.ne20 + 1]);
+    }
+
+    float S_all = 0.0f;
+    for (int sg = 0; sg < 4; ++sg) {
+        const float Sg = scratch[sg*(args.ne20 + 2) + args.ne20 + 0];
+        const float Mg = scratch[sg*(args.ne20 + 2) + args.ne20 + 1];
+        S_all += (Sg != 0.0f && !isinf(M_all)) ? Sg*exp(Mg - M_all) : 0.0f;
+    }
+
+    const int64_t rid = iq3*args.ne2*args.ne1 + iq2 + iq1*args.ne1;
+    device float * pdst = dst + (rid*args.nwg + iwg)*(args.ne20 + 2);
+
+    for (int out_dv = (int) tiisg*4; out_dv < args.ne20; out_dv += 4*N_SIMDWIDTH) {
+        float4 Wi = 0.0f;
+        for (int sg = 0; sg < 4; ++sg) {
+            const float Sg = scratch[sg*(args.ne20 + 2) + args.ne20 + 0];
+            const float Mg = scratch[sg*(args.ne20 + 2) + args.ne20 + 1];
+            const float scale_g = (Sg != 0.0f && !isinf(M_all)) ? exp(Mg - M_all) : 0.0f;
+            threadgroup float * src = scratch + sg*(args.ne20 + 2) + out_dv;
+            Wi += float4(src[0], src[1], src[2], src[3])*scale_g;
+        }
+        pdst[out_dv + 0] = Wi[0];
+        pdst[out_dv + 1] = Wi[1];
+        pdst[out_dv + 2] = Wi[2];
+        pdst[out_dv + 3] = Wi[3];
+    }
+    if (tiisg == 0) {
+        pdst[args.ne20 + 0] = S_all;
+        pdst[args.ne20 + 1] = M_all;
+    }
+
+    (void) sinks;
+}
+
+kernel void kernel_elsa_attn_ext_vec256_nsg4_F16_F16(
+        constant ggml_metal_kargs_elsa_attn_ext & args,
+        device  const char  * q,
+        device  const char  * k,
+        device  const char  * v,
+        device  const half  * mask,
+        device  const float * sinks,
+        device        float * dst,
+        threadgroup   float * scratch [[threadgroup(0)]],
+        uint3 tgpig [[threadgroup_position_in_grid]],
+        uint  sgitg [[simdgroup_index_in_threadgroup]],
+        uint  tiisg [[thread_index_in_simdgroup]]) {
+    const int row = (int) tgpig.x;
+    if (row >= args.ne03*args.ne02*args.ne01) {
+        return;
+    }
+
+    const int iq3 = row / (args.ne02*args.ne01);
+    const int iq2 = (row - iq3*args.ne02*args.ne01) / args.ne01;
+    const int iq1 = row - iq3*args.ne02*args.ne01 - iq2*args.ne01;
+
+    const int ik2 = iq2 / (args.ne02 / args.ne12);
+    const int ik3 = iq3;
+    const int iv2 = iq2 / (args.ne02 / args.ne12);
+    const int iv3 = iq3;
+
+    const int h = iq2;
+    const float slope = FC_elsa_attn_ext_has_bias
+        ? (h < args.n_head_log2 ? pow(args.m0, (float) h + 1.0f) : pow(args.m1, (float) (2*(h - args.n_head_log2) + 1)))
+        : 1.0f;
+
+    device const float * pq = (device const float *) (q + iq1*args.nb01 + iq2*args.nb02 + iq3*args.nb03);
+    device const half  * pm = FC_elsa_attn_ext_has_mask
+        ? (device const half *) ((device const char *) mask + iq1*args.nb31 + (iq2%args.ne32)*args.nb32 + (iq3%args.ne33)*args.nb33)
+        : nullptr;
+
+    float M = -INFINITY;
+    float S = 0.0f;
+    float4 W0 = 0.0f;
+    float4 W1 = 0.0f;
+
+    const int iwg = (int) tgpig.z;
+    const int dv0 = (int) tiisg*4;
+    const int dv1 = dv0 + 128;
+
+    for (int ib = (iwg*4 + (int) sgitg)*args.block_size; ib < args.ne11; ib += args.block_size*args.nwg*4) {
+        const int ib_end = min(ib + args.block_size, args.ne11);
+        const int ic = ib + (int) tiisg;
+
+        float score = -INFINITY;
+        if (ic < ib_end) {
+            float mv = 0.0f;
+            if (FC_elsa_attn_ext_has_mask) {
+                mv = slope*(float) pm[ic];
+            }
+            if (mv != -INFINITY) {
+                device const half * pk = (device const half *) (k + ic*args.nb11 + ik2*args.nb12 + ik3*args.nb13);
+                score = elsa_qk_dot(pq, pk, 256);
+                score *= args.scale;
+                if (FC_elsa_attn_ext_has_scap) {
+                    score = args.logit_softcap*precise::tanh(score);
+                }
+                score += mv;
+            }
+        }
+
+        const float Mb = simd_max(score);
+        const float ws = isinf(Mb) ? 0.0f : exp(score - Mb);
+        const float Sb = simd_sum(ws);
+        if (Sb == 0.0f) {
+            continue;
+        }
+
+        const float M_new = max(M, Mb);
+        const float w_old = exp(M - M_new);
+        const float w_blk = exp(Mb - M_new);
+
+        float4 Wb0 = 0.0f;
+        float4 Wb1 = 0.0f;
+        for (ushort lane = 0; lane < N_SIMDWIDTH; ++lane) {
+            const float wj = simd_shuffle(ws, lane);
+            const int jc = ib + lane;
+            if (jc < ib_end && wj != 0.0f) {
+                device const half * pv = (device const half *) (v + jc*args.nb21 + iv2*args.nb22 + iv3*args.nb23);
+                Wb0 += elsa_load4(pv + dv0)*wj;
+                Wb1 += elsa_load4(pv + dv1)*wj;
+            }
+        }
+
+        W0 = W0*w_old + Wb0*w_blk;
+        W1 = W1*w_old + Wb1*w_blk;
+        S = S*w_old + Sb*w_blk;
+        M = M_new;
+    }
+
+    threadgroup float * srow = scratch + (int) sgitg*(args.ne20 + 2);
+    srow[dv0 + 0] = W0[0];
+    srow[dv0 + 1] = W0[1];
+    srow[dv0 + 2] = W0[2];
+    srow[dv0 + 3] = W0[3];
+    srow[dv1 + 0] = W1[0];
+    srow[dv1 + 1] = W1[1];
+    srow[dv1 + 2] = W1[2];
+    srow[dv1 + 3] = W1[3];
+    if (tiisg == 0) {
+        srow[args.ne20 + 0] = S;
+        srow[args.ne20 + 1] = M;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sgitg != 0) {
+        return;
+    }
+
+    float M_all = -INFINITY;
+    for (int sg = 0; sg < 4; ++sg) {
+        M_all = max(M_all, scratch[sg*(args.ne20 + 2) + args.ne20 + 1]);
+    }
+
+    float S_all = 0.0f;
+    for (int sg = 0; sg < 4; ++sg) {
+        const float Sg = scratch[sg*(args.ne20 + 2) + args.ne20 + 0];
+        const float Mg = scratch[sg*(args.ne20 + 2) + args.ne20 + 1];
+        S_all += (Sg != 0.0f && !isinf(M_all)) ? Sg*exp(Mg - M_all) : 0.0f;
+    }
+
+    const int64_t rid = iq3*args.ne2*args.ne1 + iq2 + iq1*args.ne1;
+    device float * pdst = dst + (rid*args.nwg + iwg)*(args.ne20 + 2);
+
+    for (int out_dv = (int) tiisg*4; out_dv < args.ne20; out_dv += 4*N_SIMDWIDTH) {
+        float4 Wi = 0.0f;
+        for (int sg = 0; sg < 4; ++sg) {
+            const float Sg = scratch[sg*(args.ne20 + 2) + args.ne20 + 0];
+            const float Mg = scratch[sg*(args.ne20 + 2) + args.ne20 + 1];
+            const float scale_g = (Sg != 0.0f && !isinf(M_all)) ? exp(Mg - M_all) : 0.0f;
+            threadgroup float * src = scratch + sg*(args.ne20 + 2) + out_dv;
+            Wi += float4(src[0], src[1], src[2], src[3])*scale_g;
+        }
+        pdst[out_dv + 0] = Wi[0];
+        pdst[out_dv + 1] = Wi[1];
+        pdst[out_dv + 2] = Wi[2];
+        pdst[out_dv + 3] = Wi[3];
+    }
+    if (tiisg == 0) {
+        pdst[args.ne20 + 0] = S_all;
+        pdst[args.ne20 + 1] = M_all;
+    }
+
+    (void) sinks;
 }
 
 kernel void kernel_elsa_attn_ext_reduce(
@@ -7758,12 +8281,36 @@ kernel void kernel_elsa_attn_ext_reduce(
     }
 }
 
-typedef decltype(kernel_elsa_attn_ext<half, half>) elsa_attn_ext_t;
+typedef decltype(kernel_elsa_attn_ext<half, half, 0>) elsa_attn_ext_t;
+typedef decltype(kernel_elsa_attn_ext<half, half, 64>) elsa_attn_ext_dk64_t;
+typedef decltype(kernel_elsa_attn_ext<half, half, 128>) elsa_attn_ext_dk128_t;
+typedef decltype(kernel_elsa_attn_ext<half, half, 256>) elsa_attn_ext_dk256_t;
+typedef decltype(kernel_elsa_attn_ext_block<half, half>) elsa_attn_ext_block_t;
 
-template [[host_name("kernel_elsa_attn_ext_F32_F32")]] kernel elsa_attn_ext_t kernel_elsa_attn_ext<float, float>;
-template [[host_name("kernel_elsa_attn_ext_F32_F16")]] kernel elsa_attn_ext_t kernel_elsa_attn_ext<float, half>;
-template [[host_name("kernel_elsa_attn_ext_F16_F32")]] kernel elsa_attn_ext_t kernel_elsa_attn_ext<half,  float>;
-template [[host_name("kernel_elsa_attn_ext_F16_F16")]] kernel elsa_attn_ext_t kernel_elsa_attn_ext<half,  half>;
+template [[host_name("kernel_elsa_attn_ext_F32_F32")]] kernel elsa_attn_ext_t kernel_elsa_attn_ext<float, float, 0>;
+template [[host_name("kernel_elsa_attn_ext_F32_F16")]] kernel elsa_attn_ext_t kernel_elsa_attn_ext<float, half, 0>;
+template [[host_name("kernel_elsa_attn_ext_F16_F32")]] kernel elsa_attn_ext_t kernel_elsa_attn_ext<half,  float, 0>;
+template [[host_name("kernel_elsa_attn_ext_F16_F16")]] kernel elsa_attn_ext_t kernel_elsa_attn_ext<half,  half, 0>;
+
+template [[host_name("kernel_elsa_attn_ext_dk64_F32_F32")]] kernel elsa_attn_ext_dk64_t kernel_elsa_attn_ext<float, float, 64>;
+template [[host_name("kernel_elsa_attn_ext_dk64_F32_F16")]] kernel elsa_attn_ext_dk64_t kernel_elsa_attn_ext<float, half, 64>;
+template [[host_name("kernel_elsa_attn_ext_dk64_F16_F32")]] kernel elsa_attn_ext_dk64_t kernel_elsa_attn_ext<half,  float, 64>;
+template [[host_name("kernel_elsa_attn_ext_dk64_F16_F16")]] kernel elsa_attn_ext_dk64_t kernel_elsa_attn_ext<half,  half, 64>;
+
+template [[host_name("kernel_elsa_attn_ext_dk128_F32_F32")]] kernel elsa_attn_ext_dk128_t kernel_elsa_attn_ext<float, float, 128>;
+template [[host_name("kernel_elsa_attn_ext_dk128_F32_F16")]] kernel elsa_attn_ext_dk128_t kernel_elsa_attn_ext<float, half, 128>;
+template [[host_name("kernel_elsa_attn_ext_dk128_F16_F32")]] kernel elsa_attn_ext_dk128_t kernel_elsa_attn_ext<half,  float, 128>;
+template [[host_name("kernel_elsa_attn_ext_dk128_F16_F16")]] kernel elsa_attn_ext_dk128_t kernel_elsa_attn_ext<half,  half, 128>;
+
+template [[host_name("kernel_elsa_attn_ext_dk256_F32_F32")]] kernel elsa_attn_ext_dk256_t kernel_elsa_attn_ext<float, float, 256>;
+template [[host_name("kernel_elsa_attn_ext_dk256_F32_F16")]] kernel elsa_attn_ext_dk256_t kernel_elsa_attn_ext<float, half, 256>;
+template [[host_name("kernel_elsa_attn_ext_dk256_F16_F32")]] kernel elsa_attn_ext_dk256_t kernel_elsa_attn_ext<half,  float, 256>;
+template [[host_name("kernel_elsa_attn_ext_dk256_F16_F16")]] kernel elsa_attn_ext_dk256_t kernel_elsa_attn_ext<half,  half, 256>;
+
+template [[host_name("kernel_elsa_attn_ext_block_F32_F32")]] kernel elsa_attn_ext_block_t kernel_elsa_attn_ext_block<float, float>;
+template [[host_name("kernel_elsa_attn_ext_block_F32_F16")]] kernel elsa_attn_ext_block_t kernel_elsa_attn_ext_block<float, half>;
+template [[host_name("kernel_elsa_attn_ext_block_F16_F32")]] kernel elsa_attn_ext_block_t kernel_elsa_attn_ext_block<half,  float>;
+template [[host_name("kernel_elsa_attn_ext_block_F16_F16")]] kernel elsa_attn_ext_block_t kernel_elsa_attn_ext_block<half,  half>;
 
 template<typename T0, typename T1>
 kernel void kernel_cpy_t_t(

@@ -2,6 +2,11 @@
 
 ![llama](https://user-images.githubusercontent.com/1991296/230134379-7181e485-c521-4d23-a0d6-f7b3b61ba524.png)
 
+> [!NOTE]
+> This fork adds an experimental native ELSA attention path for local Metal inference work on Apple Silicon.
+> It introduces `GGML_OP_ELSA_ATTN_EXT`, enables graph routing through `LLAMA_ELSA_ATTN=1`, and includes native Metal ELSA kernels plus decode-specialized paths for long-context benchmarking against FlashAttention.
+> The current focus is exact attention correctness, Apple M2 profiling, and narrow decode-heavy wins on selected Qwen shapes while prefill and mixed prompt+decode paths are still under active optimization.
+
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Release](https://img.shields.io/github/v/release/ggml-org/llama.cpp)](https://github.com/ggml-org/llama.cpp/releases)
 [![Server](https://github.com/ggml-org/llama.cpp/actions/workflows/server.yml/badge.svg)](https://github.com/ggml-org/llama.cpp/actions/workflows/server.yml)

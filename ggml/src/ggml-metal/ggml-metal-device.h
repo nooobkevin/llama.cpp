@@ -209,6 +209,47 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_elsa_attn
         bool has_bias,
         bool has_scap);
 
+struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_elsa_attn_ext_dk(
+        ggml_metal_library_t lib,
+        const struct ggml_tensor * op,
+        bool has_mask,
+        bool has_sinks,
+        bool has_bias,
+        bool has_scap,
+        int32_t dk);
+
+struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_elsa_attn_ext_block(
+        ggml_metal_library_t lib,
+        const struct ggml_tensor * op,
+        bool has_mask,
+        bool has_sinks,
+        bool has_bias,
+        bool has_scap);
+
+struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_elsa_attn_ext_vec128(
+        ggml_metal_library_t lib,
+        const struct ggml_tensor * op,
+        bool has_mask,
+        bool has_sinks,
+        bool has_bias,
+        bool has_scap);
+
+struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_elsa_attn_ext_vec128_nsg4(
+        ggml_metal_library_t lib,
+        const struct ggml_tensor * op,
+        bool has_mask,
+        bool has_sinks,
+        bool has_bias,
+        bool has_scap);
+
+struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_elsa_attn_ext_vec256_nsg4(
+        ggml_metal_library_t lib,
+        const struct ggml_tensor * op,
+        bool has_mask,
+        bool has_sinks,
+        bool has_bias,
+        bool has_scap);
+
 struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_elsa_attn_ext_reduce(
         ggml_metal_library_t lib);
 

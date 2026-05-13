@@ -626,6 +626,169 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_elsa_attn_ext(
     return res;
 }
 
+ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_elsa_attn_ext_dk(
+        ggml_metal_library_t lib, const ggml_tensor * op,
+        bool has_mask, bool has_sinks, bool has_bias, bool has_scap,
+        int32_t dk) {
+    GGML_ASSERT(dk == 64 || dk == 128 || dk == 256);
+    GGML_ASSERT(op->src[0]->ne[0] == dk);
+
+    char base[256];
+    char name[256];
+
+    const char * type_k = op->src[1]->type == GGML_TYPE_F32 ? "F32" : "F16";
+    const char * type_v = op->src[2]->type == GGML_TYPE_F32 ? "F32" : "F16";
+
+    snprintf(base, 256, "kernel_elsa_attn_ext_dk%d_%s_%s", dk, type_k, type_v);
+    snprintf(name, 256, "%s_mask=%d_sinks=%d_bias=%d_scap=%d", base, has_mask, has_sinks, has_bias, has_scap);
+
+    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+    if (!res.pipeline) {
+        ggml_metal_cv_t cv = ggml_metal_cv_init();
+
+        ggml_metal_cv_set_bool(cv, has_mask,  FC_ELSA_ATTN_EXT + 0);
+        ggml_metal_cv_set_bool(cv, has_sinks, FC_ELSA_ATTN_EXT + 1);
+        ggml_metal_cv_set_bool(cv, has_bias,  FC_ELSA_ATTN_EXT + 2);
+        ggml_metal_cv_set_bool(cv, has_scap,  FC_ELSA_ATTN_EXT + 3);
+
+        res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
+
+        ggml_metal_cv_free(cv);
+    }
+
+    res.smem = 32 * sizeof(float);
+
+    return res;
+}
+
+ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_elsa_attn_ext_block(
+        ggml_metal_library_t lib, const ggml_tensor * op,
+        bool has_mask, bool has_sinks, bool has_bias, bool has_scap) {
+    char base[256];
+    char name[256];
+
+    const char * type_k = op->src[1]->type == GGML_TYPE_F32 ? "F32" : "F16";
+    const char * type_v = op->src[2]->type == GGML_TYPE_F32 ? "F32" : "F16";
+
+    snprintf(base, 256, "kernel_elsa_attn_ext_block_%s_%s", type_k, type_v);
+    snprintf(name, 256, "%s_mask=%d_sinks=%d_bias=%d_scap=%d", base, has_mask, has_sinks, has_bias, has_scap);
+
+    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+    if (!res.pipeline) {
+        ggml_metal_cv_t cv = ggml_metal_cv_init();
+
+        ggml_metal_cv_set_bool(cv, has_mask,  FC_ELSA_ATTN_EXT + 0);
+        ggml_metal_cv_set_bool(cv, has_sinks, FC_ELSA_ATTN_EXT + 1);
+        ggml_metal_cv_set_bool(cv, has_bias,  FC_ELSA_ATTN_EXT + 2);
+        ggml_metal_cv_set_bool(cv, has_scap,  FC_ELSA_ATTN_EXT + 3);
+
+        res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
+
+        ggml_metal_cv_free(cv);
+    }
+
+    res.smem = 32 * sizeof(float);
+
+    return res;
+}
+
+ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_elsa_attn_ext_vec128(
+        ggml_metal_library_t lib, const ggml_tensor * op,
+        bool has_mask, bool has_sinks, bool has_bias, bool has_scap) {
+    GGML_ASSERT(op->src[1]->type == GGML_TYPE_F16);
+    GGML_ASSERT(op->src[2]->type == GGML_TYPE_F16);
+    GGML_ASSERT(op->src[1]->ne[0] == 128);
+    GGML_ASSERT(op->src[2]->ne[0] == 128);
+
+    char base[256];
+    char name[256];
+
+    snprintf(base, 256, "kernel_elsa_attn_ext_vec128_F16_F16");
+    snprintf(name, 256, "%s_mask=%d_sinks=%d_bias=%d_scap=%d", base, has_mask, has_sinks, has_bias, has_scap);
+
+    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+    if (!res.pipeline) {
+        ggml_metal_cv_t cv = ggml_metal_cv_init();
+
+        ggml_metal_cv_set_bool(cv, has_mask,  FC_ELSA_ATTN_EXT + 0);
+        ggml_metal_cv_set_bool(cv, has_sinks, FC_ELSA_ATTN_EXT + 1);
+        ggml_metal_cv_set_bool(cv, has_bias,  FC_ELSA_ATTN_EXT + 2);
+        ggml_metal_cv_set_bool(cv, has_scap,  FC_ELSA_ATTN_EXT + 3);
+
+        res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
+
+        ggml_metal_cv_free(cv);
+    }
+
+    return res;
+}
+
+ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_elsa_attn_ext_vec128_nsg4(
+        ggml_metal_library_t lib, const ggml_tensor * op,
+        bool has_mask, bool has_sinks, bool has_bias, bool has_scap) {
+    GGML_ASSERT(op->src[1]->type == GGML_TYPE_F16);
+    GGML_ASSERT(op->src[2]->type == GGML_TYPE_F16);
+    GGML_ASSERT(op->src[1]->ne[0] == 128);
+    GGML_ASSERT(op->src[2]->ne[0] == 128);
+
+    char base[256];
+    char name[256];
+
+    snprintf(base, 256, "kernel_elsa_attn_ext_vec128_nsg4_F16_F16");
+    snprintf(name, 256, "%s_mask=%d_sinks=%d_bias=%d_scap=%d", base, has_mask, has_sinks, has_bias, has_scap);
+
+    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+    if (!res.pipeline) {
+        ggml_metal_cv_t cv = ggml_metal_cv_init();
+
+        ggml_metal_cv_set_bool(cv, has_mask,  FC_ELSA_ATTN_EXT + 0);
+        ggml_metal_cv_set_bool(cv, has_sinks, FC_ELSA_ATTN_EXT + 1);
+        ggml_metal_cv_set_bool(cv, has_bias,  FC_ELSA_ATTN_EXT + 2);
+        ggml_metal_cv_set_bool(cv, has_scap,  FC_ELSA_ATTN_EXT + 3);
+
+        res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
+
+        ggml_metal_cv_free(cv);
+    }
+
+    res.smem = 4*(128 + 2)*sizeof(float);
+
+    return res;
+}
+
+ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_elsa_attn_ext_vec256_nsg4(
+        ggml_metal_library_t lib, const ggml_tensor * op,
+        bool has_mask, bool has_sinks, bool has_bias, bool has_scap) {
+    GGML_ASSERT(op->src[1]->type == GGML_TYPE_F16);
+    GGML_ASSERT(op->src[2]->type == GGML_TYPE_F16);
+    GGML_ASSERT(op->src[1]->ne[0] == 256);
+    GGML_ASSERT(op->src[2]->ne[0] == 256);
+
+    char base[256];
+    char name[256];
+
+    snprintf(base, 256, "kernel_elsa_attn_ext_vec256_nsg4_F16_F16");
+    snprintf(name, 256, "%s_mask=%d_sinks=%d_bias=%d_scap=%d", base, has_mask, has_sinks, has_bias, has_scap);
+
+    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
+    if (!res.pipeline) {
+        ggml_metal_cv_t cv = ggml_metal_cv_init();
+
+        ggml_metal_cv_set_bool(cv, has_mask,  FC_ELSA_ATTN_EXT + 0);
+        ggml_metal_cv_set_bool(cv, has_sinks, FC_ELSA_ATTN_EXT + 1);
+        ggml_metal_cv_set_bool(cv, has_bias,  FC_ELSA_ATTN_EXT + 2);
+        ggml_metal_cv_set_bool(cv, has_scap,  FC_ELSA_ATTN_EXT + 3);
+
+        res = ggml_metal_library_compile_pipeline(lib, base, name, cv);
+
+        ggml_metal_cv_free(cv);
+    }
+
+    res.smem = 4*(256 + 2)*sizeof(float);
+
+    return res;
+}
+
 ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_elsa_attn_ext_reduce(ggml_metal_library_t lib) {
     const char * base = "kernel_elsa_attn_ext_reduce";
     const char * name = "kernel_elsa_attn_ext_reduce";
